@@ -1,4 +1,4 @@
-# Holo for Linux
+# Holo — Desk Tap Controls for Linux and Windows
 
 Turn the desk around your laptop into tap-sensitive buttons. Tap near the
 laptop, and a classifier listens through the built-in microphone, works out
@@ -8,7 +8,9 @@ which of four zones you tapped, and runs a command you assigned to that zone.
 > author's desk and less reliably for the others. See [Results](#results).
 > No accuracy is promised on your hardware: calibrate and run `eval` yourself.
 
-This is an independent Linux port of the idea behind
+Supports Linux and experimental Windows builds, including a standalone Windows GUI.
+
+This is an independent implementation of the idea behind
 [JustinGamer191/Holo](https://github.com/JustinGamer191/Holo), a macOS app.
 It is not affiliated with that project, and it does not contain its code. It
 was written from that project's public README description of the pipeline,

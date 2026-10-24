@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Graphical interface for Holo for Linux (Qt / PySide6).
+"""Graphical interface for Holo for Linux and Windows (Qt / PySide6).
 
 Run:  python holo_gui.py            (open the window)
       python holo_gui.py --minimized  (start in the tray, used for autostart)

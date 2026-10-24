@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Holo for Linux: classify taps on the desk around a laptop into four zones.
+"""Holo for Linux and Windows: classify desk taps into four zones.
 
 Pipeline (follows the same general idea as the macOS Holo project):
   mic stream -> adaptive onset detector -> 90 ms window -> sustained/clip gate
