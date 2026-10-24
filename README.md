@@ -1,4 +1,4 @@
-# Holo — Desk Tap Controls for Linux and Windows
+# Holo — Desk Tap Controls
 
 Turn the desk around your laptop into tap-sensitive buttons. Tap near the
 laptop, and a classifier listens through the built-in microphone, works out
