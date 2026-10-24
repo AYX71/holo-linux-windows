@@ -10,9 +10,9 @@ import os
 import pathlib
 import sys
 import tempfile
-import time
 import types
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -112,6 +112,8 @@ class GuiFlow(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
+        cls.env_patch = patch.dict(os.environ, {"APPDATA": cls.tmp.name})
+        cls.env_patch.start()
         t = pathlib.Path(cls.tmp.name)
         cls.saved = (holo.DATA_DIR, holo.CONF_DIR, holo.PROFILE, holo.ACTIONS,
                      os.environ.get("XDG_CONFIG_HOME"))
@@ -128,7 +130,9 @@ class GuiFlow(unittest.TestCase):
         quiet = types.SimpleNamespace(information=lambda *a, **k: None,
                                       warning=lambda *a, **k: None)
         holo_gui.QMessageBox = quiet       # a real modal dialog would hang the test
-        cls.win = holo_gui.MainWindow()
+        devices = types.SimpleNamespace(query_devices=lambda: [], query_hostapis=lambda: [])
+        with patch.dict(sys.modules, {"sounddevice": devices}):
+            cls.win = holo_gui.MainWindow()
         cls.win.worker, cls.win.worker_channels = _DummyWorker(), 1
 
     @classmethod
@@ -138,6 +142,7 @@ class GuiFlow(unittest.TestCase):
             os.environ.pop("XDG_CONFIG_HOME", None)
         else:
             os.environ["XDG_CONFIG_HOME"] = xdg
+        cls.env_patch.stop()
         cls.tmp.cleanup()
 
     def test_1_taps_before_calibration_do_not_crash(self):
@@ -161,32 +166,25 @@ class GuiFlow(unittest.TestCase):
 
     def test_3_live_tap_runs_the_zone_action(self):
         w = self.win
-        marker = pathlib.Path(self.tmp.name) / "fired"
-        w._set_action("right_front", f"touch {marker}")
-        ok = False
-        for _ in range(6):
-            holo._last_fired.clear()
-            w.on_detected(T.one_window(T.resonant_tap("right_front")))
-            for _ in range(20):
-                if marker.exists():
-                    ok = True
+        w._set_action("right_front", "holo-test-action")
+        with patch.object(holo, "spawn") as spawn:
+            for _ in range(6):
+                holo._last_fired.clear()
+                w.on_detected(T.one_window(T.resonant_tap("right_front")))
+                if spawn.called:
                     break
-                time.sleep(0.1)
-            if ok:
-                break
-        self.assertTrue(ok, "right_front tap never ran its action")
+            spawn.assert_called_with("holo-test-action")
 
     def test_4_speech_like_sound_is_ignored(self):
         w = self.win
-        marker = pathlib.Path(self.tmp.name) / "fired2"
-        w._set_action("left_rear", f"touch {marker}")
+        w._set_action("left_rear", "holo-test-action")
         t = np.arange(holo.WIN) / holo.SR
         tone = (0.2 * np.sin(2 * np.pi * 400 * t)).astype("float32")
         self.assertIsNotNone(holo.gate(tone))
         holo._last_fired.clear()
-        w.on_detected(tone)
-        time.sleep(0.3)
-        self.assertFalse(marker.exists())
+        with patch.object(holo, "spawn") as spawn:
+            w.on_detected(tone)
+            spawn.assert_not_called()
 
     def test_5_actions_persist_and_autostart_toggles(self):
         w = self.win
@@ -203,6 +201,46 @@ class GuiFlow(unittest.TestCase):
         w.on_failed("boom")
         self.assertIsNone(w.worker)
         w.worker, w.worker_channels = _DummyWorker(), 1
+
+    def test_7_test_button_uses_shared_spawn(self):
+        self.win._set_action("right_front", "echo test")
+        with patch.object(holo, "spawn") as spawn:
+            self.win.test_action("right_front")
+            spawn.assert_called_once_with("echo test")
+
+    def test_8_windows_devices_keep_backend_and_selection(self):
+        class Box:
+            def __init__(self):
+                self.items = []
+
+            def blockSignals(self, value):
+                pass
+
+            def clear(self):
+                self.items.clear()
+
+            def addItem(self, label, data):
+                self.items.append((label, data))
+
+            def findData(self, data):
+                return next(i for i, (_, value) in enumerate(self.items) if value == data)
+
+            def setCurrentIndex(self, index):
+                self.index = index
+
+        devices = [{"name": "Mic", "hostapi": i, "max_input_channels": 1}
+                   for i in range(2)]
+        sd = types.SimpleNamespace(query_devices=lambda: devices,
+                                   query_hostapis=lambda: [{"name": "MME"}, {"name": "WASAPI"}])
+        box = Box()
+        window = types.SimpleNamespace(device_box=box, settings=core.Settings(), log=lambda s: None)
+        window.settings.set("device_name", core.device_key("Mic", "WASAPI"))
+        with patch.object(sys, "platform", "win32"), patch.dict(sys.modules, {"sounddevice": sd}):
+            self.gui.MainWindow.populate_devices(window)
+        self.assertEqual(window._device, 1)
+        self.assertEqual(window._devices[1], "Mic [WASAPI]")
+        self.assertEqual(box.items[1], ("Mic [MME]  (#0)", 0))
+        self.assertEqual(box.index, 2)
 
 
 if __name__ == "__main__":

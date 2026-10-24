@@ -43,8 +43,17 @@ NEG_SECONDS = 30                 # how long to record background sounds
 NEG_MIN = 8                      # fewer usable background sounds than this: skip
 NEG_MAX_KEEP = 60                # keep at most this many (newest)
 
-DATA_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "holo"
-CONF_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "holo"
+def app_dirs(platform, env, home):
+    """Application data/config locations; empty environment values are unset."""
+    home = Path(home)
+    if platform == "win32":
+        return (Path(env.get("LOCALAPPDATA") or home / "AppData/Local") / "holo",
+                Path(env.get("APPDATA") or home / "AppData/Roaming") / "holo")
+    return (Path(env.get("XDG_DATA_HOME") or home / ".local/share") / "holo",
+            Path(env.get("XDG_CONFIG_HOME") or home / ".config") / "holo")
+
+
+DATA_DIR, CONF_DIR = app_dirs(sys.platform, os.environ, Path.home())
 PROFILE = DATA_DIR / "profile.json"
 ACTIONS = CONF_DIR / "actions.json"
 
@@ -541,6 +550,13 @@ _last_fired = {}
 COOLDOWN = 1.5   # seconds before the same zone can fire again
 
 
+def spawn(command):
+    """Launch a shell action without blocking or opening a Windows console."""
+    options = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
+    return subprocess.Popen(command, shell=True, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, **options)
+
+
 def run_action(zone):
     if not ACTIONS.exists():
         return
@@ -550,7 +566,7 @@ def run_action(zone):
     _last_fired[zone] = now
     cmd = json.loads(ACTIONS.read_text()).get(zone)
     if cmd:
-        subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        spawn(cmd)
 
 
 def cmd_run(args):

@@ -11,15 +11,16 @@ which of four zones you tapped, and runs a command you assigned to that zone.
 This is an independent Linux port of the idea behind
 [JustinGamer191/Holo](https://github.com/JustinGamer191/Holo), a macOS app.
 It is not affiliated with that project, and it does not contain its code. It
-was written from that project's public description of the pipeline.
+was written from that project's public README description of the pipeline,
+with Claude's help. No code was copied.
 
 ## What it does
 
 - Four zones: `left_rear`, `right_rear`, `left_front`, `right_front`
 - Runs entirely locally: no network, no cloud, audio is never saved
 - One Python file (`holo.py`), two dependencies (`numpy`, `sounddevice`)
-- Optional background class: record typing, talking, and touches once so they
-  are ignored instead of firing an action
+- Optional, unproven background class: record typing, talking, and touches
+  to try to reduce false triggers
 - Optional, experimental stereo cues if your microphone really is stereo
 - Runs at login as a systemd user service, or from a tray icon with the GUI
 - A Qt graphical interface: pick the microphone, calibrate with a picture of
@@ -48,35 +49,28 @@ while a rejection just does nothing.
 
 ## Results
 
-Measured on one laptop on one desk, using a built-in microphone through
-PipeWire, with 10-15 taps per zone per run:
+Held-out eval accuracy on the author's laptop (Arch Linux, KDE Wayland,
+PipeWire, microphone device #11) was **70%, 75%, 78%, 82%, and 82%** across runs.
+Almost all misses were rejections (usually `low confidence`), with very few
+wrong-zone predictions. Earlier live screenshots showed `right_front` recognized
+21 of 21 taps; that observation is separate from held-out eval accuracy.
 
-| Run | Overall | Notes |
-| --- | --- | --- |
-| Eval 1 (60 taps) | 70% | Mostly rejections, not wrong zones |
-| Eval 2 (60 taps) | 82% | After recalibrating with more varied taps |
-| Eval 3 (60 taps) | 82% | No wrong zones, 11 rejections |
-| Eval 4 (60 taps) | 75% | Lower threshold let wrong zones through; reverted |
-| Eval 5 (40 taps) | 57% | One zone failed completely in that run |
-
-`right_front` was consistently reliable (87-100%, scores around 0.7-1.3 in live
-use). The other zones, especially on the left, were less consistent between
-runs. Results vary a lot between runs, so don't read much into any single one.
-
-These numbers were measured **before** the background class and stereo cues
-were added, so they do not describe those features. A later 40-tap run on the
-same code with no background class gave 78% (three zones 80-100%, `right_front`
-40%, all misses rejections rather than wrong zones).
+Lowering `MIN_SCORE` to 0.10 made results worse, including seven wrong-zone
+predictions, so the default remains 0.30. Moving the laptop after calibration
+invalidates the profile.
 
 Known gaps:
 
 - The leave-one-out score printed during calibration is always about 100% and
   does not predict real accuracy. Only `eval` is a real test.
 - The background class and stereo cues are tested on synthetic audio only
-  (`python -m unittest discover -s tests`). Real-world effect is unmeasured:
+  (`python -m unittest discover -s tests`). The real-world evidence for the
+  background class is inconclusive; both features remain unverified on hardware:
   after adding background sounds, run `eval` and check real taps are still
   recognized, because a background class can also reject genuine taps.
-- Stereo only helps if the microphone really delivers two different channels.
+- Stereo cues require two different channels; whether they improve accuracy is unverified.
+- The systemd service under KDE and rendering of `docs/pipeline.svg` on GitHub
+  have not been verified.
 
 ## Install
 
@@ -100,6 +94,43 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 .venv/bin/python holo.py devices
 ```
+
+## Windows (experimental)
+
+Windows support has **never been run on Windows**. The installer, microphone
+capture, actions, GUI, and autostart are untested there until someone confirms
+them. Linux tests of platform branches do not establish Windows compatibility.
+
+Install Python 3 with the Python launcher or Python on PATH. In PowerShell,
+from the project folder:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Gui
+.\holo.cmd devices
+.\holo.cmd calibrate
+.\holo.cmd eval
+.\holo.cmd
+```
+
+The first command creates `.venv`, installs dependencies and the optional GUI,
+and adds a Holo shortcut to the Start menu. Omit `-Gui` for CLI only. The next
+commands list microphones, calibrate, measure held-out accuracy, and listen.
+Keep the project folder in place; the shortcut and action presets refer to it.
+
+- Enable microphone access for desktop apps in Windows privacy settings.
+- Each microphone may appear several times, once per audio backend (MME,
+  WASAPI, and others). The GUI includes backend names. Prefer the system
+  default or MME first; WASAPI may refuse the required 48 kHz stream.
+- Turn off audio enhancements/noise suppression if available, then recalibrate.
+- Screenshot and notification presets use the bundled PowerShell scripts in
+  `windows/`. Screenshots cover the virtual desktop and save to
+  `Pictures\Screenshots`; Windows notification settings may suppress balloons.
+- Data is in `%LOCALAPPDATA%\holo`, actions/settings in `%APPDATA%\holo`.
+  Commands in `actions.json` use the Windows command shell.
+- The GUI's start-at-login setting writes a UTF-16 `.vbs` launcher in the user
+  Startup folder. It starts `pythonw.exe` hidden. Enable “Start listening when
+  the window opens” if desired; stop any other Holo process first.
+- There is no systemd service on Windows. Linux `.sh` installers are for Linux.
 
 ## Graphical interface
 
@@ -161,8 +192,9 @@ often busy) and check that it points at the built-in microphone with
 Calibration can optionally record 30 seconds of background sounds (the default
 is no): type, talk, click the trackpad lightly, put things down on the desk,
 but do not move the laptop and do not tap the zones. Holo
-learns these as a "none" class and ignores similar sounds later. You can add
-more at any time without redoing the taps (needs a profile made with this
+learns these as a "none" class to try to ignore similar sounds later. This is
+opt-in and unproven: synthetic tests pass, but real-world evidence is inconclusive.
+You can add more at any time without redoing the taps (needs a profile made with this
 version):
 
 ```bash
@@ -183,8 +215,8 @@ holo stereo-check
 
 If it says the channels differ, calibrate with `holo calibrate --channels 2`.
 This adds left/right level differences and the inter-channel delay as features,
-which may help separate left from right. If it says the channels are identical,
-skip this.
+whose effect on real-world accuracy is unverified. If it says the channels are
+identical, skip this.
 
 ### Run at login
 
@@ -244,8 +276,18 @@ Constants at the top of `holo.py`:
 
 ## Troubleshooting
 
-- **`ModuleNotFoundError: No module named 'sounddevice'`**: the virtual
-  environment is not active. Run `source ~/.venv/bin/activate`.
+- **Tests report three import errors, or `ModuleNotFoundError` for `numpy` or
+  `sounddevice`**: the Python running them lacks dependencies. From the project
+  folder on Linux, install them and run tests with the same Python:
+
+  ```bash
+  .venv/bin/python -m pip install -r requirements.txt
+  .venv/bin/python -m unittest discover -s tests
+  ```
+
+  If `.venv` does not exist, first run `python -m venv .venv`. For the GUI also
+  install `requirements-gui.txt`. On Windows use `.venv\Scripts\python.exe`
+  in place of `.venv/bin/python`.
 - **The GUI says it could not open the microphone**: another program is using
   it, or the chosen device is wrong. Try another entry in the Microphone list.
 - **Nothing is detected**: check the default input with `wpctl status`, and

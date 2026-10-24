@@ -2,6 +2,8 @@
 import os
 import pathlib
 import subprocess
+import shutil
+from unittest.mock import patch
 import sys
 import tempfile
 import unittest
@@ -12,8 +14,9 @@ import holo_gui_core as core  # noqa: E402
 
 
 class Presets(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("sh"), "POSIX shell unavailable")
     def test_every_preset_is_valid_shell(self):
-        for name, cmd in core.PRESETS.items():
+        for name, cmd in core.presets_for("linux", ".").items():
             if cmd:
                 r = subprocess.run(["sh", "-n", "-c", cmd], capture_output=True)
                 self.assertEqual(r.returncode, 0, name)
@@ -50,6 +53,7 @@ class Files(unittest.TestCase):
             self.assertEqual(core.Settings(p).get("device_name"), "pipewire")
             self.assertEqual(core.Settings(p).get("missing", 5), 5)
 
+    @patch.object(core.sys, "platform", "linux")
     def test_autostart_file(self):
         with tempfile.TemporaryDirectory() as d:
             old = os.environ.get("XDG_CONFIG_HOME")

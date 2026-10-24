@@ -1,7 +1,9 @@
 """Qt-free logic for the Holo GUI, so it can be tested without a display."""
 import json
 import math
+import ntpath
 import os
+import sys
 from pathlib import Path
 
 import holo
@@ -25,6 +27,30 @@ PRESETS = {
     "Play / pause media": "playerctl play-pause",
     "Lock the screen": "loginctl lock-session",
 }
+
+
+_LINUX_PRESETS = PRESETS
+
+
+def presets_for(platform, base):
+    if platform != "win32":
+        return dict(_LINUX_PRESETS)
+    scripts = Path(base) / "windows"
+
+    def ps(name):
+        return ('powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden '
+                '-ExecutionPolicy Bypass -File "' + str(scripts / name) + '"')
+    return {
+        "Nothing": "",
+        "Screenshot + notification": ps("holo-shot.ps1"),
+        "Show a notification": ps("holo-notify.ps1"),
+        "Open a website (edit the address)": 'start "" https://archlinux.org',
+        "Play / pause media": 'powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -Command "(New-Object -ComObject WScript.Shell).SendKeys([char]179)"',
+        "Lock the screen": "rundll32 user32.dll,LockWorkStation",
+    }
+
+
+PRESETS = presets_for(sys.platform, Path(__file__).resolve().parent)
 
 
 def zone_title(zone):
@@ -80,7 +106,10 @@ class Settings:
 
 # ---- autostart (XDG autostart works on KDE, GNOME, XFCE, ...) --------------
 def autostart_path():
-    base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    if sys.platform == "win32":
+        base = holo.app_dirs("win32", os.environ, Path.home())[1].parent
+        return base / "Microsoft/Windows/Start Menu/Programs/Startup/holo-gui.vbs"
+    base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
     return base / "autostart" / "holo-gui.desktop"
 
 
@@ -100,11 +129,22 @@ def desktop_entry(python, script):
             "X-GNOME-Autostart-enabled=true\n")
 
 
+def vbs_entry(python, script):
+    # ntpath also permits testing Windows paths on Linux.
+    python = ntpath.join(ntpath.dirname(python), "pythonw.exe")
+    command = f'"{python}" "{script}" --minimized'
+    quoted = '"' + command.replace('"', '""') + '"'
+    return 'CreateObject("WScript.Shell").Run ' + quoted + ', 0, False\r\n'
+
+
 def set_autostart(enabled, python, script):
     path = autostart_path()
     if enabled:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(desktop_entry(python, script))
+        if sys.platform == "win32":
+            path.write_bytes(vbs_entry(python, script).encode("utf-16"))
+        else:
+            path.write_text(desktop_entry(python, script))
     elif path.exists():
         path.unlink()
     return path
@@ -121,8 +161,12 @@ def input_devices(devices):
             if d.get("max_input_channels", 0) > 0]
 
 
-def device_label(index, name):
-    return f"{name}  (#{index})"
+def device_key(name, backend=None):
+    return f"{name} [{backend}]" if backend else name
+
+
+def device_label(index, name, backend=None):
+    return f"{device_key(name, backend)}  (#{index})"
 
 
 def choose_device(devs, saved_name=None):

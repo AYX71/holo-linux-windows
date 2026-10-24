@@ -8,7 +8,6 @@ It reuses the detector and classifier from holo.py and the same profile and
 actions files as the command-line version, so both stay in sync.
 """
 import queue
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -369,7 +368,12 @@ class MainWindow(QMainWindow):
         devs = []
         try:
             import sounddevice as sd
-            devs = core.input_devices(sd.query_devices())
+            devices = sd.query_devices()
+            devs = core.input_devices(devices)
+            if sys.platform == "win32":
+                backends = sd.query_hostapis()
+                devs = [(i, core.device_key(name, backends[devices[i]["hostapi"]]["name"]))
+                        for i, name in devs]
         except Exception as e:
             self.log(f"Could not list microphones: {e}")
         for index, name in devs:
@@ -554,8 +558,7 @@ class MainWindow(QMainWindow):
         if not command:
             self.log(f"{core.zone_title(zone)} has no action to test.")
             return
-        subprocess.Popen(command, shell=True, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL)
+        holo.spawn(command)
         self.log(f"Ran the {core.zone_title(zone)} action.")
 
     # ---- settings -------------------------------------------------------------------
