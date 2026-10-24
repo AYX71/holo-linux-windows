@@ -97,6 +97,35 @@ python3 -m venv .venv
 
 ## Windows (experimental)
 
+### Standalone GUI executable
+
+The `Windows EXE` GitHub Actions workflow builds a single `Holo.exe` for
+64-bit Windows with Python, Qt, NumPy, and the audio dependencies bundled.
+After a successful build, open [Actions](https://github.com/AYX71/holo-linux/actions/workflows/windows-exe.yml),
+select the latest successful run, and download **Holo-Windows-x64** under
+Artifacts (GitHub sign-in required). Extract the ZIP, keep `Holo.exe` in a
+permanent folder, and double-click it. No Python installation or terminal
+commands are required to use the executable. Calibration is still required.
+
+The workflow runs the tests on Windows and checks that the packaged GUI starts
+and loads its audio dependency and action scripts. These checks do not test
+microphone capture, zone accuracy, actions, or login behavior on real hardware.
+An executable is available only after the workflow finishes successfully.
+The executable is unsigned, so Windows may display a reputation warning.
+
+To build it yourself on Windows with Python installed:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements-build.txt
+.\windows\build-exe.ps1
+```
+
+The output is `dist\Holo.exe`. The build script must run on Windows.
+
+### Run from source
+
 Windows support has **never been run on Windows**. The installer, microphone
 capture, actions, GUI, and autostart are untested there until someone confirms
 them. Linux tests of platform branches do not establish Windows compatibility.
@@ -128,7 +157,8 @@ Keep the project folder in place; the shortcut and action presets refer to it.
 - Data is in `%LOCALAPPDATA%\holo`, actions/settings in `%APPDATA%\holo`.
   Commands in `actions.json` use the Windows command shell.
 - The GUI's start-at-login setting writes a UTF-16 `.vbs` launcher in the user
-  Startup folder. It starts `pythonw.exe` hidden. Enable “Start listening when
+  Startup folder. It starts `Holo.exe` for a packaged app or `pythonw.exe` for
+  a source install, hidden. Enable “Start listening when
   the window opens” if desired; stop any other Holo process first.
 - There is no systemd service on Windows. Linux `.sh` installers are for Linux.
 

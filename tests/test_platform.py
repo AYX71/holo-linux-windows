@@ -63,6 +63,29 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(entry, 'CreateObject("WScript.Shell").Run """C:\\My Tools\\pythonw.exe"" ""C:\\Holo Files\\holo_gui.py"" --minimized", 0, False\r\n')
         self.assertIn('a""b', core.vbs_entry('python.exe', 'a"b'))
 
+    def test_frozen_autostart_runs_executable_without_python_or_script(self):
+        with patch.object(sys, 'frozen', True, create=True):
+            entry = core.vbs_entry(r'C:\Holo App\Holo.exe', 'temporary/holo_gui.py')
+        self.assertEqual(entry, 'CreateObject("WScript.Shell").Run """C:\\Holo App\\Holo.exe"" --minimized", 0, False\r\n')
+        self.assertNotIn('pythonw', entry)
+        self.assertNotIn('temporary', entry)
+
+    def test_bundled_presets_survive_temporary_resource_removal(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            source = root / 'extracted'
+            (source / 'windows').mkdir(parents=True)
+            for name in ('holo-shot.ps1', 'holo-notify.ps1'):
+                (source / 'windows' / name).write_bytes((ROOT / 'windows' / name).read_bytes())
+            base = core.prepare_windows_scripts(source, root / 'persistent')
+            presets = core.presets_for('win32', base)
+            for name in ('holo-shot.ps1', 'holo-notify.ps1'):
+                expected = (source / 'windows' / name).read_bytes()
+                (source / 'windows' / name).unlink()
+                self.assertEqual((base / 'windows' / name).read_bytes(), expected)
+                self.assertTrue(any(str(base / 'windows' / name) in cmd for cmd in presets.values()))
+            self.assertTrue(all(str(source) not in cmd for cmd in presets.values()))
+
     def test_windows_startup_utf16_and_removal(self):
         with tempfile.TemporaryDirectory() as d, patch.object(core.sys, 'platform', 'win32'), patch.dict(os.environ, {'APPDATA': d}):
             expected = Path(d) / 'Microsoft/Windows/Start Menu/Programs/Startup/holo-gui.vbs'

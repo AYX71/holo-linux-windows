@@ -50,7 +50,25 @@ def presets_for(platform, base):
     }
 
 
-PRESETS = presets_for(sys.platform, Path(__file__).resolve().parent)
+def prepare_windows_scripts(base, data_dir):
+    """Keep preset paths valid after a one-file executable deletes its temp dir."""
+    target = Path(data_dir) / "bundled-actions"
+    scripts = target / "windows"
+    scripts.mkdir(parents=True, exist_ok=True)
+    for name in ("holo-shot.ps1", "holo-notify.ps1"):
+        contents = (Path(base) / "windows" / name).read_bytes()
+        path = scripts / name
+        if not path.exists() or path.read_bytes() != contents:
+            tmp = path.with_suffix(".tmp")
+            tmp.write_bytes(contents)
+            tmp.replace(path)
+    return target
+
+
+_PRESET_BASE = Path(__file__).resolve().parent
+if sys.platform == "win32" and getattr(sys, "frozen", False):
+    _PRESET_BASE = prepare_windows_scripts(_PRESET_BASE, holo.DATA_DIR)
+PRESETS = presets_for(sys.platform, _PRESET_BASE)
 
 
 def zone_title(zone):
@@ -131,8 +149,11 @@ def desktop_entry(python, script):
 
 def vbs_entry(python, script):
     # ntpath also permits testing Windows paths on Linux.
-    python = ntpath.join(ntpath.dirname(python), "pythonw.exe")
-    command = f'"{python}" "{script}" --minimized'
+    if getattr(sys, "frozen", False):
+        command = f'"{python}" --minimized'
+    else:
+        python = ntpath.join(ntpath.dirname(python), "pythonw.exe")
+        command = f'"{python}" "{script}" --minimized'
     quoted = '"' + command.replace('"', '""') + '"'
     return 'CreateObject("WScript.Shell").Run ' + quoted + ', 0, False\r\n'
 

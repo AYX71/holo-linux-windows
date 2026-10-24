@@ -1,0 +1,66 @@
+name: Windows EXE
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Install build dependencies
+        run: python -m pip install -r requirements-build.txt
+      - name: Test
+        run: python -m unittest discover -s tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+      - name: Check PowerShell syntax
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+            $parseErrors = $null
+            $tokens = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$parseErrors)
+            if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
+          }
+      - name: Build standalone GUI
+        shell: pwsh
+        run: ./windows/build-exe.ps1
+      - name: Smoke test bundled executable
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP "holo-self-test.json"
+          $process = Start-Process -FilePath ./dist/Holo.exe -ArgumentList @('--self-test-file', ('"' + $report + '"')) -PassThru
+          if (-not $process.WaitForExit(60000)) {
+            $process.Kill()
+            throw 'Holo.exe startup timed out'
+          }
+          if ($process.ExitCode -ne 0) { throw 'Holo.exe startup failed' }
+          $result = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
+          if (-not $result.ok) { throw 'Holo.exe self-test failed' }
+      - name: Package download
+        shell: pwsh
+        run: |
+          Copy-Item LICENSE dist/LICENSE.txt
+          Copy-Item windows/EXE-README.txt dist/README.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Holo-Windows-x64
+          path: |
+            dist/Holo.exe
+            dist/LICENSE.txt
+            dist/README.txt
+          if-no-files-found: error
+          retention-days: 90

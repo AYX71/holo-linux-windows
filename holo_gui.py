@@ -8,6 +8,7 @@ It reuses the detector and classifier from holo.py and the same profile and
 actions files as the command-line version, so both stay in sync.
 """
 import queue
+import json
 import sys
 import time
 from pathlib import Path
@@ -589,6 +590,19 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Holo")
+    if len(sys.argv) == 3 and sys.argv[1] == "--self-test-file":
+        # Packaging check: load the bundled audio DLL and construct real widgets.
+        # This does not open an input stream or claim hardware compatibility.
+        import sounddevice
+        scripts = core._PRESET_BASE / "windows"
+        for name in ("holo-shot.ps1", "holo-notify.ps1"):
+            if not (scripts / name).is_file():
+                raise RuntimeError(f"Missing bundled script: {name}")
+        win = MainWindow()
+        win.shutdown()
+        Path(sys.argv[2]).write_text(json.dumps({"ok": True, "audio_import": True,
+                                              "gui_constructed": True}))
+        return
     hidden = "--minimized" in sys.argv
     win = MainWindow(start_hidden=hidden)
     app.setQuitOnLastWindowClosed(win.tray is None)
