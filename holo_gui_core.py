@@ -9,6 +9,8 @@ from pathlib import Path
 import holo
 
 CUSTOM = "Custom command"
+SENSITIVITIES = {"Less sensitive": 0.75, "Balanced": 1.0,
+                 "Sensitive": 1.5, "Very sensitive": 2.0}
 
 _SHOT = ('f="$HOME/Pictures/Screenshots/holo-$(date +%s%N).png"; '
          'mkdir -p "$HOME/Pictures/Screenshots"; ')

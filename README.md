@@ -126,9 +126,10 @@ The output is `dist\Holo.exe`. The build script must run on Windows.
 
 ### Run from source
 
-Windows support has **never been run on Windows**. The installer, microphone
-capture, actions, GUI, and autostart are untested there until someone confirms
-them. Linux tests of platform branches do not establish Windows compatibility.
+Windows support remains experimental. The Windows build and packaged-startup
+checks passed on GitHub Actions, and a user reports that the executable runs
+but misses taps or needs loud taps. There are no measured Windows accuracy
+results yet. Actions and autostart still need hardware verification.
 
 Install Python 3 with the Python launcher or Python on PATH. In PowerShell,
 from the project folder:
@@ -186,6 +187,29 @@ two programs cannot share the microphone cleanly.
 The GUI is new. Its logic is covered by tests, but how it looks and behaves in
 a real Qt session has had little testing. If it misbehaves, the command-line
 version keeps working unchanged.
+
+### Quiet taps and audio stability
+
+If the microphone level moves but quiet taps produce no log entry, choose
+**Settings → Tap sensitivity → Sensitive**. Try **Very sensitive** only if
+needed. Balanced preserves the original trigger threshold; higher sensitivity
+lowers the tap-volume trigger and can detect more typing and other sounds.
+The clipping/sustained-sound gate and classifier confidence checks still apply.
+This does not amplify the microphone or recover sounds removed by Windows
+noise suppression. Keep the room quiet for about a second when listening starts,
+then recalibrate with normal taps and check all four zones in Live.
+
+If the log instead says **low confidence**, the tap was already heard: increasing
+sensitivity does not fix the classifier. Recalibrate without moving the laptop,
+using varied positions within each zone. If you change the microphone or audio
+backend, recalibrate again.
+
+The GUI reports a silent microphone, clipping, and audio interruptions. Audio
+buffering is bounded, interrupted windows are discarded, and taps delayed in
+the GUI for more than half a second cannot fire an action. The input stream uses
+the backend's higher-latency buffer setting to favor reliability; this may add
+latency. These changes and sensitivity controls are covered by synthetic/mocked
+tests; improved real-world recognition has not yet been measured.
 
 ## Usage
 

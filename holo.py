@@ -78,7 +78,10 @@ class Detector:
     Blocks may be mono (BLOCK,) or multi-channel (BLOCK, C).
     """
 
-    def __init__(self):
+    def __init__(self, sensitivity=1.0):
+        if not np.isfinite(sensitivity) or not 0.5 <= sensitivity <= 2.0:
+            raise ValueError("Sensitivity must be between 0.5 and 2.0")
+        self.sensitivity = float(sensitivity)
         self.floor = None
         self.seen = 0
         self.learn_blocks = int(0.75 * SR / BLOCK)
@@ -112,13 +115,17 @@ class Detector:
             self.prev.append(block)
             return None
 
-        if rms > max(self.floor * ONSET_RATIO, ONSET_MIN_RMS):
+        if rms > self.threshold:
             self.collecting = list(self.prev) + [block]
             return None
 
         self.floor = 0.995 * self.floor + 0.005 * rms
         self.prev.append(block)
         return None
+
+    @property
+    def threshold(self):
+        return max((self.floor or 0) * ONSET_RATIO, ONSET_MIN_RMS) / self.sensitivity
 
 
 def gate(window):
@@ -321,31 +328,62 @@ def cap_negatives(X, y):
 class Listener:
     """Owns the input stream; yields detected tap windows."""
 
-    def __init__(self, device=None, channels=1):
+    def __init__(self, device=None, channels=1, sensitivity=1.0):
         import sounddevice as sd
         self.channels = channels
-        self.q = queue.Queue()
-        self.detector = Detector()
+        self.q = queue.Queue(maxsize=50)  # at most half a second, never an endless backlog
+        self.sensitivity = sensitivity
+        self.detector = Detector(sensitivity)
+        self.dropped_blocks = 0
+        self.input_overflows = 0
         self.stream = sd.InputStream(
             samplerate=SR, blocksize=BLOCK, channels=channels, dtype="float32",
-            device=device, callback=self._cb)
+            device=device, callback=self._cb, latency="high")
 
     def _cb(self, indata, frames, t, status):
         block = indata[:, 0].copy() if self.channels == 1 else indata.copy()
-        self.q.put((time.monotonic(), block))
+        gap = bool(status)
+        if gap:
+            self.input_overflows += 1
+        if self.q.full():
+            # Callback must never wait for the consumer. Keep the newest audio.
+            while True:
+                try:
+                    self.q.get_nowait()
+                    self.dropped_blocks += 1
+                except queue.Empty:
+                    break
+            gap = True
+        self.q.put_nowait((time.monotonic(), block, gap))
+
+    def read_block(self, timeout=0.2):
+        t, block, gap = self.q.get(timeout=timeout)
+        if gap:
+            # Never join pieces of an interrupted recording into a fake tap.
+            self.detector = Detector(self.sensitivity)
+        if time.monotonic() - t > 0.5:
+            self.detector = Detector(self.sensitivity)
+            raise queue.Empty
+        return t, block
 
     def __enter__(self):
-        self.stream.start()
+        try:
+            self.stream.start()
+        except Exception:
+            self.stream.close()
+            raise
         return self
 
     def __exit__(self, *a):
-        self.stream.stop()
-        self.stream.close()
+        try:
+            self.stream.stop()
+        finally:
+            self.stream.close()
 
     def drain(self):
         while not self.q.empty():
             self.q.get_nowait()
-        self.detector = Detector()
+        self.detector = Detector(self.sensitivity)
         time.sleep(0.9)          # let the detector relearn the room
         while not self.q.empty():
             self.q.get_nowait()
@@ -358,7 +396,7 @@ class Listener:
             if end is not None and time.monotonic() > end:
                 return None, None
             try:
-                t, block = self.q.get(timeout=0.2)
+                t, block = self.read_block(timeout=0.2)
             except queue.Empty:
                 continue
             w = self.detector.feed(block)
@@ -482,7 +520,7 @@ def cmd_stereo_check(args):
         end = time.monotonic() + 6
         while time.monotonic() < end:
             try:
-                _, b = ls.q.get(timeout=0.2)
+                _, b = ls.read_block(timeout=0.2)
             except queue.Empty:
                 continue
             chunks.append(b)

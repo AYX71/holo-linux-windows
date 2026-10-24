@@ -12,7 +12,7 @@ import sys
 import tempfile
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -79,11 +79,15 @@ def _install_fake_qt():
         def __getattr__(self, name):
             return _Any()
 
+        def sender(self):
+            return None
+
     def cls(name, **attrs):
         return type(name, (_Base,), attrs)
 
     core_mod = types.ModuleType("PySide6.QtCore")
     core_mod.Signal = Signal
+    core_mod.Slot = lambda *a: lambda fn: fn
     for n in ("QRectF", "Qt", "QThread", "QTimer"):
         setattr(core_mod, n, cls(n))
     gui_mod = types.ModuleType("PySide6.QtGui")
@@ -241,6 +245,71 @@ class GuiFlow(unittest.TestCase):
         self.assertEqual(window._devices[1], "Mic [WASAPI]")
         self.assertEqual(box.items[1], ("Mic [MME]  (#0)", 0))
         self.assertEqual(box.index, 2)
+
+    def test_9_sensitive_setting_persists_and_restarts_capture(self):
+        with patch.object(self.win, 'start_worker') as start:
+            self.win._set_sensitivity('Sensitive')
+            self.assertEqual(core.Settings().get('sensitivity'), 'Sensitive')
+            start.assert_called_once_with(1)
+
+    def test_audio_failure_closes_stream(self):
+        listener = Mock()
+        listener.read_block.side_effect = RuntimeError('disconnected')
+        worker = self.gui.AudioWorker(None, 1, 1.5)
+        failures = []
+        worker.failed.connect(failures.append)
+        with patch.object(holo, 'Listener', return_value=listener) as create:
+            worker.run()
+        create.assert_called_once_with(None, 1, 1.5)
+        self.assertEqual(failures, ['disconnected'])
+        listener.stream.close.assert_called_once()
+
+    def test_audio_start_failure_closes_stream(self):
+        listener = Mock()
+        listener.stream.start.side_effect = RuntimeError('busy')
+        worker = self.gui.AudioWorker(None, 1)
+        failures = []
+        worker.failed.connect(failures.append)
+        with patch.object(holo, 'Listener', return_value=listener):
+            worker.run()
+        self.assertEqual(failures, ['busy'])
+        listener.stream.close.assert_called_once()
+
+    def test_audio_without_callbacks_reports_failure(self):
+        import queue
+        listener = Mock()
+        listener.read_block.side_effect = queue.Empty
+        worker = self.gui.AudioWorker(None, 1)
+        failures = []
+        worker.failed.connect(failures.append)
+        with patch.object(holo, 'Listener', return_value=listener), patch.object(self.gui.time, 'monotonic', side_effect=[0, 0, 4]):
+            worker.run()
+        self.assertIn('No audio received', failures[0])
+        listener.stream.close.assert_called_once()
+
+    def test_slow_stopping_thread_is_retained_and_not_replaced(self):
+        stuck = types.SimpleNamespace(stop=lambda: False)
+        with patch.object(self.win, 'worker', stuck), patch.object(self.gui, 'AudioWorker') as create:
+            self.assertFalse(self.win.start_worker(1))
+            self.assertIs(self.win.worker, stuck)
+            create.assert_not_called()
+
+    def test_stale_tap_cannot_be_added_to_calibration(self):
+        session = core.CalibrationSession(holo.ZONES, 3)
+        session.begin_zone()
+        window = T.one_window(T.resonant_tap('left_rear'))
+        with patch.object(self.win, 'session', session), patch.object(self.gui.time, 'monotonic', return_value=10):
+            self.win.on_detected(window, captured_at=8)
+        self.assertEqual(session.samples['left_rear'], [])
+
+    @unittest.skipUnless(REAL_QT, 'Requires real Qt sender identity')
+    def test_signal_from_an_old_worker_is_ignored(self):
+        old_worker = self.gui.AudioWorker(None, 1)
+        old_worker.detected.connect(self.win.on_detected)
+        window = T.one_window(T.resonant_tap('right_front'))
+        with patch.object(self.win.model, 'predict') as predict:
+            old_worker.detected.emit(window, self.gui.time.monotonic())
+            predict.assert_not_called()
 
 
 if __name__ == "__main__":

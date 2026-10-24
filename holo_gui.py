@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QRectF, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QRectF, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QGridLayout, QHBoxLayout, QLabel,
@@ -29,47 +29,78 @@ class AudioWorker(QThread):
     """Reads the microphone and reports levels and detected tap windows."""
 
     level = Signal(float)
-    detected = Signal(object)
+    detected = Signal(object, float)
     ready = Signal()
     failed = Signal(str)
+    health = Signal(str)
 
-    def __init__(self, device, channels):
+    def __init__(self, device, channels, sensitivity=1.0):
         super().__init__()
         self.device = device
         self.channels = channels
+        self.sensitivity = sensitivity
         self._running = True
 
     def run(self):
-        try:
-            ls = holo.Listener(self.device, self.channels)
-            ls.stream.start()
-        except Exception as e:                      # PortAudio errors vary
-            self.failed.emit(str(e))
-            return
+        ls = None
         announced = False
         count = 0
+        last_audio = time.monotonic()
+        last_report = last_audio
+        last_gaps = 0
+        report_peak = 0.0
         try:
+            ls = holo.Listener(self.device, self.channels, self.sensitivity)
+            ls.stream.start()
+            last_audio = time.monotonic()
             while self._running:
                 try:
-                    _, block = ls.q.get(timeout=0.2)
+                    captured_at, block = ls.read_block(timeout=0.2)
                 except queue.Empty:
+                    if time.monotonic() - last_audio > 3:
+                        raise RuntimeError("No audio received for 3 seconds. Check the microphone "
+                                           "and Windows microphone permissions, then restart listening.")
                     continue
+                last_audio = time.monotonic()
+                report_peak = max(report_peak, float(np.max(np.abs(block))))
+                if ls.detector.seen == 0:
+                    announced = False
                 count += 1
                 if count % 3 == 0:
                     self.level.emit(float(np.sqrt(np.mean(block ** 2))))
                 w = ls.detector.feed(block)
+                if last_audio - last_report >= 1:
+                    gaps = ls.dropped_blocks + ls.input_overflows
+                    if gaps > last_gaps:
+                        text = "Audio interrupted; relearning room noise. Try another mic backend."
+                    elif report_peak >= holo.CLIP_PEAK:
+                        text = "Microphone is clipping. Reduce input volume or tap more lightly."
+                    elif report_peak < 1e-7:
+                        text = "Microphone is silent. Check mute, input device, and permissions."
+                    else:
+                        text = "Microphone active. Quiet taps missed? Try Sensitive in Settings."
+                    self.health.emit(text)
+                    last_report, last_gaps = last_audio, gaps
+                    report_peak = 0.0
                 if not announced and ls.detector.seen > ls.detector.learn_blocks:
                     announced = True
                     self.ready.emit()
                 if w is not None:
-                    self.detected.emit(w)
+                    self.detected.emit(w, captured_at)
+        except Exception as e:
+            if self._running:
+                self.failed.emit(str(e))
         finally:
-            ls.stream.stop()
-            ls.stream.close()
+            if ls is not None:
+                try:
+                    ls.stream.close()
+                except Exception as e:
+                    if self._running:
+                        self.failed.emit(f"Could not close the microphone: {e}")
 
     def stop(self):
         self._running = False
-        self.wait(3000)
+        return self.wait(3000)
 
 
 class ZoneWidget(QWidget):
@@ -177,6 +208,7 @@ class MainWindow(QMainWindow):
         self.model = None
         self.profile_channels = 1
         self.session = None
+        self._accept_after = 0.0
         self._device = None
         self._devices = {}
         self._quitting = False
@@ -217,6 +249,9 @@ class MainWindow(QMainWindow):
 
         self.status = QLabel("Not listening.")
         root.addWidget(self.status)
+        self.audio_health = QLabel("")
+        self.audio_health.setWordWrap(True)
+        root.addWidget(self.audio_health)
 
         self.tabs = QTabWidget()
         root.addWidget(self.tabs, 1)
@@ -298,6 +333,17 @@ class MainWindow(QMainWindow):
     def _build_settings_tab(self):
         w = QWidget()
         v = QVBoxLayout(w)
+        v.addWidget(QLabel("Tap sensitivity (use Sensitive if quiet taps are missed):"))
+        self.sensitivity_box = QComboBox()
+        self.sensitivity_box.addItems(list(core.SENSITIVITIES))
+        saved = self.settings.get("sensitivity", "Balanced")
+        self.sensitivity_box.setCurrentText(saved if saved in core.SENSITIVITIES else "Balanced")
+        self.sensitivity_box.currentTextChanged.connect(self._set_sensitivity)
+        v.addWidget(self.sensitivity_box)
+        hint = QLabel("Higher sensitivity hears quieter sounds and may detect more typing. "
+                      "Zone confidence checks still apply. Keep the room quiet during startup.")
+        hint.setWordWrap(True)
+        v.addWidget(hint)
         self.autostart_box = QCheckBox("Start Holo (in the tray) when I log in")
         self.autostart_box.setChecked(core.autostart_enabled())
         self.autostart_box.toggled.connect(self._set_autostart)
@@ -390,37 +436,55 @@ class MainWindow(QMainWindow):
         data = self.device_box.currentData()
         self._device = data if isinstance(data, int) else None
         self.settings.set("device_name", self._devices.get(self._device))
+        if self.session is not None:
+            self.cancel_calibration()
         if self.worker is not None:
             self.start_worker(self.worker_channels)
 
     # ---- listening ----------------------------------------------------------------
     def toggle_listening(self):
         if self.worker is not None:
-            self.stop_worker()
-            self.set_status("Not listening.")
+            if self.stop_worker():
+                self.set_status("Not listening.")
         else:
             self.start_worker(self.profile_channels)
 
     def start_worker(self, channels):
-        self.stop_worker()
-        self.worker = AudioWorker(self._device, channels)
+        if not self.stop_worker():
+            return False
+        sensitivity = core.SENSITIVITIES.get(self.settings.get("sensitivity"), 1.0)
+        self.worker = AudioWorker(self._device, channels, sensitivity)
         self.worker_channels = channels
         self.worker.level.connect(self.on_level)
         self.worker.detected.connect(self.on_detected)
         self.worker.ready.connect(self.on_ready)
         self.worker.failed.connect(self.on_failed)
+        self.worker.health.connect(self.on_health)
         self.worker.start()
         self.listen_btn.setText("Stop listening")
         self.set_status("Learning the room noise... stay quiet for a second.")
+        return True
 
     def stop_worker(self):
-        worker, self.worker = self.worker, None
+        worker = self.worker
         if worker is not None:
-            worker.stop()
+            if worker.stop() is False:
+                self.set_status("Microphone is still stopping. Wait, then try again.")
+                return False
+        self.worker = None
         self.listen_btn.setText("Start listening")
         self.level_bar.setValue(0)
+        self.audio_health.setText("")
+        return True
 
+    def _from_current_worker(self):
+        sender = self.sender()
+        return sender is None or sender is self.worker
+
+    @Slot()
     def on_ready(self):
+        if not self._from_current_worker():
+            return
         if self.session is not None:
             self.set_status("Listening. Calibrating...")
         elif self.model is None:
@@ -428,21 +492,39 @@ class MainWindow(QMainWindow):
         else:
             self.set_status("Listening. Tap a zone.")
 
+    @Slot(str)
     def on_failed(self, message):
-        self.worker = None
-        self.listen_btn.setText("Start listening")
+        if not self._from_current_worker():
+            return
+        stopped = self.stop_worker()
+        if self.session is not None:
+            self.cancel_calibration()
+        if stopped:
+            self.listen_btn.setText("Start listening")
         self.level_bar.setValue(0)
-        self.set_status("Could not open the microphone.")
+        self.set_status("Microphone stopped or unavailable." if stopped
+                        else "Microphone is still stopping. Wait, then try again.")
         QMessageBox.warning(self, "Microphone error",
-                            f"Could not open the microphone:\n\n{message}\n\n"
+                            f"Microphone error:\n\n{message}\n\n"
                             "Try another device from the list, or check that "
                             "no other program (such as the holo service) is using it.")
 
-    def on_level(self, rms):
-        self.level_bar.setValue(core.level_percent(rms))
+    @Slot(str)
+    def on_health(self, text):
+        if self._from_current_worker():
+            self.audio_health.setText(text)
 
-    def on_detected(self, window):
-        if self.worker is None:
+    @Slot(float)
+    def on_level(self, rms):
+        if self._from_current_worker():
+            self.level_bar.setValue(core.level_percent(rms))
+
+    @Slot(object, float)
+    def on_detected(self, window, captured_at=None):
+        if self.worker is None or not self._from_current_worker():
+            return
+        if captured_at is not None and (captured_at < self._accept_after
+                                       or time.monotonic() - captured_at > 0.5):
             return
         try:
             reason = holo.gate(window)
@@ -470,7 +552,8 @@ class MainWindow(QMainWindow):
     # ---- calibration ------------------------------------------------------------
     def start_calibration(self):
         if self.worker is None or self.worker_channels != 1:
-            self.start_worker(1)
+            if not self.start_worker(1):
+                return
         self.session = core.CalibrationSession(holo.ZONES, holo.CAL_PER_ZONE)
         self.cal_start.setEnabled(False)
         self.cal_cancel.setEnabled(True)
@@ -489,6 +572,7 @@ class MainWindow(QMainWindow):
     def calibration_ready(self):
         if self.session is None:
             return
+        self._accept_after = time.monotonic()
         self.session.begin_zone()
         self.cal_ready.setEnabled(False)
         self.cal_text.setText(f"Tap the {core.zone_title(self.session.current)} "
@@ -563,6 +647,15 @@ class MainWindow(QMainWindow):
         self.log(f"Ran the {core.zone_title(zone)} action.")
 
     # ---- settings -------------------------------------------------------------------
+    def _set_sensitivity(self, name):
+        if name not in core.SENSITIVITIES:
+            return
+        self.settings.set("sensitivity", name)
+        if self.session is not None:
+            self.cancel_calibration()
+        if self.worker is not None:
+            self.start_worker(self.worker_channels)
+
     def _set_autostart(self, enabled):
         script = str(Path(__file__).resolve())
         core.set_autostart(bool(enabled), sys.executable, script)
@@ -573,18 +666,22 @@ class MainWindow(QMainWindow):
             event.ignore()
             self.hide()
         else:
-            self.shutdown()
-            event.accept()
+            if self.shutdown():
+                event.accept()
+            else:
+                event.ignore()
 
     def shutdown(self):
-        self.stop_worker()
+        if not self.stop_worker():
+            return False
         if self.tray is not None:
             self.tray.hide()
+        return True
 
     def quit_app(self):
         self._quitting = True
-        self.shutdown()
-        QApplication.quit()
+        if self.shutdown():
+            QApplication.quit()
 
 
 def main():
