@@ -105,5 +105,88 @@ class Hearing(unittest.TestCase):
                 holo.Detector(value)
 
 
+class HeadsetCapture(unittest.TestCase):
+    def make_listener(self):
+        stream = Mock()
+        sd = types.SimpleNamespace(InputStream=Mock(side_effect=[ValueError('48 kHz unsupported'), stream]),
+                                   query_devices=Mock(return_value={'default_samplerate': 16000}))
+        with patch.dict(sys.modules, {'sounddevice': sd}):
+            listener = holo.Listener(device=3, headset=True)
+        return listener, sd
+
+    def test_headset_falls_back_to_native_rate(self):
+        listener, sd = self.make_listener()
+        self.assertEqual(listener.sample_rate, 16000)
+        self.assertEqual(sd.InputStream.call_args.kwargs['samplerate'], 16000)
+        self.assertEqual(sd.InputStream.call_args.kwargs['blocksize'], 160)
+        self.assertEqual(sd.InputStream.call_args.kwargs['device'], 3)
+
+    def test_laptop_does_not_silently_change_sample_rate(self):
+        sd = types.SimpleNamespace(InputStream=Mock(side_effect=ValueError('unsupported')))
+        with patch.dict(sys.modules, {'sounddevice': sd}), self.assertRaises(ValueError):
+            holo.Listener()
+        sd.InputStream.assert_called_once()
+
+    def test_native_audio_produces_full_detector_blocks(self):
+        listener, _ = self.make_listener()
+        for _ in range(2):
+            listener._cb(np.ones((160, 1), dtype='float32'), 160, None, False)
+        _, block = listener.read_block()
+        self.assertEqual(block.shape, (holo.BLOCK,))
+        self.assertTrue(np.all(block == 1))
+
+    def test_gap_discards_resampler_tail(self):
+        listener, _ = self.make_listener()
+        for _ in range(2):
+            listener._cb(np.ones((160, 1), dtype='float32'), 160, None, False)
+        listener.read_block()
+        for gap in (True, False):
+            listener._cb(np.zeros((160, 1), dtype='float32'), 160, None, gap)
+        _, block = listener.read_block()
+        self.assertTrue(np.all(block == 0))
+        self.assertEqual(listener.detector.seen, 0)
+
+    def test_streaming_interpolation_is_continuous_across_irregular_chunks(self):
+        for rate in (8000, 16000, 22050, 44100):
+            with self.subTest(rate=rate):
+                adapter = holo.NativeRateAdapter(rate)
+                t = np.arange(rate) / rate
+                signal = np.sin(2 * np.pi * 700 * t).astype('float32')
+                blocks = []
+                for start in range(0, len(signal), 137):
+                    blocks.extend(adapter.feed(signal[start:start + 137]))
+                actual = np.concatenate(blocks)
+                expected = np.interp(np.arange(len(actual)) * rate / holo.SR,
+                                     np.arange(len(signal)), signal)
+                np.testing.assert_allclose(actual, expected, atol=1e-6)
+                self.assertGreaterEqual(len(actual), holo.SR - holo.BLOCK)
+                self.assertLess(len(adapter.pending), holo.BLOCK)
+                self.assertLessEqual(len(adapter.source), 2)
+
+    def test_stereo_channels_are_kept_separate(self):
+        adapter = holo.NativeRateAdapter(16000, 2)
+        signal = np.column_stack([np.ones(1000), -np.ones(1000)])
+        blocks = adapter.feed(signal)
+        self.assertEqual(blocks[0].shape, (holo.BLOCK, 2))
+        np.testing.assert_array_equal(blocks[0][:, 0], 1)
+        np.testing.assert_array_equal(blocks[0][:, 1], -1)
+
+    def test_synthetic_native_rate_tap_reaches_detector_and_gate(self):
+        rate = 16000
+        adapter = holo.NativeRateAdapter(rate)
+        signal = np.random.default_rng(5).normal(0, .0002, rate * 2)
+        t = np.arange(int(.08 * rate)) / rate
+        signal[rate:rate + len(t)] += .15 * np.exp(-60 * t) * np.sin(2 * np.pi * 2300 * t)
+        detector = holo.Detector(1.5)
+        windows = []
+        for start in range(0, len(signal), 160):
+            for block in adapter.feed(signal[start:start + 160]):
+                window = detector.feed(block)
+                if window is not None:
+                    windows.append(window)
+        self.assertEqual(len(windows), 1)
+        self.assertIsNone(holo.gate(windows[0]))
+
+
 if __name__ == '__main__':
     unittest.main()

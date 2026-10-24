@@ -11,6 +11,21 @@ import holo
 CUSTOM = "Custom command"
 SENSITIVITIES = {"Less sensitive": 0.75, "Balanced": 1.0,
                  "Sensitive": 1.5, "Very sensitive": 2.0}
+INPUT_MODES = {"Laptop microphone": "laptop", "Headset microphone (experimental)": "headset"}
+
+
+def profile_path(mode):
+    return holo.DATA_DIR / "profile-headset.json" if mode == "headset" else holo.PROFILE
+
+
+def setting_key(mode, name):
+    return "headset_" + name if mode == "headset" else name
+
+
+def sensitivity_name(settings, mode):
+    default = "Sensitive" if mode == "headset" else "Balanced"
+    value = settings.get(setting_key(mode, "sensitivity"), default)
+    return value if value in SENSITIVITIES else default
 
 _SHOT = ('f="$HOME/Pictures/Screenshots/holo-$(date +%s%N).png"; '
          'mkdir -p "$HOME/Pictures/Screenshots"; ')

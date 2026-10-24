@@ -13,6 +13,13 @@ Keep quiet for a second at startup, then calibrate with normal taps.
 If Live says "low confidence", the tap was heard: recalibrate instead.
 The microphone status reports silence, clipping, and interrupted audio.
 
+For desk taps through a headset mic, choose Headset microphone (experimental)
+above the mic selector, select the headset input, and recalibrate all four zones.
+Headset and laptop calibrations, mic choices, and sensitivity settings are separate.
+Keep the headset/boom/head position consistent. Noise suppression may remove taps.
+If 48 kHz is unsupported, headset mode tries the device's default 8-48 kHz rate.
+This mode is unverified on real headsets and does not detect earcup touches.
+
 Settings can enable start at login. Keep the executable in the same location
 or disable and re-enable that setting after moving it.
 Data: %LOCALAPPDATA%\holo

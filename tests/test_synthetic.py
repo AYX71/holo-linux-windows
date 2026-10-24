@@ -85,7 +85,9 @@ class DetectorAndGate(unittest.TestCase):
         class Fake(holo.Listener):
             def __init__(self):
                 import queue
+                from collections import deque
                 self.q = queue.Queue()
+                self.ready_blocks = deque()
                 self.detector = holo.Detector()
         self.assertEqual(Fake().next_window(timeout=0.3), (None, None))
 

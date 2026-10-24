@@ -211,6 +211,29 @@ the backend's higher-latency buffer setting to favor reliability; this may add
 latency. These changes and sensitivity controls are covered by synthetic/mocked
 tests; improved real-world recognition has not yet been measured.
 
+### Headset microphone mode (experimental)
+
+Choose **Headset microphone (experimental)** from the mode list above the
+microphone selector, select your headset's actual **input microphone**, then
+calibrate the same four desk zones. This listens for desk taps through the
+headset mic; it does not detect touches on the earcups or use the headphones
+as a sensor. The mode remembers its own microphone and sensitivity and stores
+its calibration in `profile-headset.json`. Switching back to Laptop microphone
+restores the original `profile.json`. Actions remain shared between modes.
+
+Headset mode defaults to Sensitive. If the device refuses 48 kHz, it tries the
+device's advertised default rate between 8 kHz and 48 kHz and converts that
+stream to the detector's 48 kHz blocks. Conversion cannot recover frequencies
+the microphone did not capture. The regular laptop mode keeps its existing
+48 kHz requirement.
+
+Keep your headset, boom, and head position consistent after calibration.
+Speech, boom movement, Bluetooth voice processing, and headset noise suppression
+may interfere with desk taps. If the selected headset's processing removes taps,
+use Laptop microphone mode and explicitly choose the built-in mic while wearing
+your headset. Headset recognition and accuracy have not been measured on hardware;
+automated tests cover mode/profile isolation and simulated sample-rate conversion.
+
 ## Usage
 
 After running the installer, `holo` is a shortcut for `python holo.py`: for

@@ -34,11 +34,12 @@ class AudioWorker(QThread):
     failed = Signal(str)
     health = Signal(str)
 
-    def __init__(self, device, channels, sensitivity=1.0):
+    def __init__(self, device, channels, sensitivity=1.0, headset=False):
         super().__init__()
         self.device = device
         self.channels = channels
         self.sensitivity = sensitivity
+        self.headset = headset
         self._running = True
 
     def run(self):
@@ -50,8 +51,14 @@ class AudioWorker(QThread):
         last_gaps = 0
         report_peak = 0.0
         try:
-            ls = holo.Listener(self.device, self.channels, self.sensitivity)
+            if self.headset:
+                ls = holo.Listener(self.device, self.channels, self.sensitivity, headset=True)
+            else:
+                ls = holo.Listener(self.device, self.channels, self.sensitivity)
             ls.stream.start()
+            if self.headset:
+                self.health.emit(f"Headset microphone active at {ls.sample_rate:g} Hz. "
+                                 "Keep the headset in the same position as calibration.")
             last_audio = time.monotonic()
             while self._running:
                 try:
@@ -201,6 +208,10 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Holo")
         self.resize(600, 680)
         self.settings = core.Settings()
+        self.input_mode = self.settings.get("input_mode", "laptop")
+        if self.input_mode not in core.INPUT_MODES.values():
+            self.input_mode = "laptop"
+        self.profile_file = core.profile_path(self.input_mode)
         self.zone_actions = core.load_actions()
         self.zone_actions_enabled = True
         self.worker = None
@@ -226,6 +237,18 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
+
+        self.mode_box = QComboBox()
+        self.mode_box.addItems(list(core.INPUT_MODES))
+        self.mode_box.setCurrentText(next(k for k, v in core.INPUT_MODES.items() if v == self.input_mode))
+        self.mode_box.currentTextChanged.connect(self._set_input_mode)
+        root.addWidget(self.mode_box)
+        self.mode_hint = QLabel("Select your headset microphone below, then calibrate its four desk zones. "
+                               "Keep the boom and your head in a consistent position. "
+                               "Headset noise suppression can remove desk taps.")
+        self.mode_hint.setWordWrap(True)
+        self.mode_hint.setVisible(self.input_mode == "headset")
+        root.addWidget(self.mode_hint)
 
         top = QHBoxLayout()
         top.addWidget(QLabel("Microphone:"))
@@ -336,8 +359,7 @@ class MainWindow(QMainWindow):
         v.addWidget(QLabel("Tap sensitivity (use Sensitive if quiet taps are missed):"))
         self.sensitivity_box = QComboBox()
         self.sensitivity_box.addItems(list(core.SENSITIVITIES))
-        saved = self.settings.get("sensitivity", "Balanced")
-        self.sensitivity_box.setCurrentText(saved if saved in core.SENSITIVITIES else "Balanced")
+        self.sensitivity_box.setCurrentText(core.sensitivity_name(self.settings, self.input_mode))
         self.sensitivity_box.currentTextChanged.connect(self._set_sensitivity)
         v.addWidget(self.sensitivity_box)
         hint = QLabel("Higher sensitivity hears quieter sounds and may detect more typing. "
@@ -352,7 +374,8 @@ class MainWindow(QMainWindow):
         self.listen_box.setChecked(bool(self.settings.get("listen_on_start", False)))
         self.listen_box.toggled.connect(lambda on: self.settings.set("listen_on_start", bool(on)))
         v.addWidget(self.listen_box)
-        v.addWidget(QLabel(f"Profile: {holo.PROFILE}"))
+        self.profile_label = QLabel(f"Profile: {self.profile_file}")
+        v.addWidget(self.profile_label)
         v.addWidget(QLabel(f"Actions: {holo.ACTIONS}"))
         note = QLabel("If you also run the command-line version or the systemd "
                       "service, stop it first: two programs can't share the "
@@ -402,7 +425,7 @@ class MainWindow(QMainWindow):
     # ---- profile and devices ------------------------------------------------------
     def load_model(self):
         try:
-            self.model, self.profile_channels, _ = holo.load_profile()
+            self.model, self.profile_channels, _ = holo.load_profile(self.profile_file)
         except (SystemExit, Exception):            # no or unreadable profile
             self.model, self.profile_channels = None, 1
         if self.model is None:
@@ -425,7 +448,12 @@ class MainWindow(QMainWindow):
             self.log(f"Could not list microphones: {e}")
         for index, name in devs:
             self.device_box.addItem(core.device_label(index, name), index)
-        want = core.choose_device(devs, self.settings.get("device_name"))
+        mode = getattr(self, "input_mode", "laptop")
+        saved = self.settings.get(core.setting_key(mode, "device_name"))
+        if mode == "headset":
+            want = next((i for i, name in devs if name == saved), None)
+        else:
+            want = core.choose_device(devs, saved)
         self._devices = dict(devs)
         self._device = want
         pos = self.device_box.findData(want) if want is not None else 0
@@ -435,7 +463,7 @@ class MainWindow(QMainWindow):
     def on_device_changed(self, _index=0):
         data = self.device_box.currentData()
         self._device = data if isinstance(data, int) else None
-        self.settings.set("device_name", self._devices.get(self._device))
+        self.settings.set(core.setting_key(self.input_mode, "device_name"), self._devices.get(self._device))
         if self.session is not None:
             self.cancel_calibration()
         if self.worker is not None:
@@ -452,8 +480,8 @@ class MainWindow(QMainWindow):
     def start_worker(self, channels):
         if not self.stop_worker():
             return False
-        sensitivity = core.SENSITIVITIES.get(self.settings.get("sensitivity"), 1.0)
-        self.worker = AudioWorker(self._device, channels, sensitivity)
+        sensitivity = core.SENSITIVITIES[core.sensitivity_name(self.settings, self.input_mode)]
+        self.worker = AudioWorker(self._device, channels, sensitivity, headset=self.input_mode == "headset")
         self.worker_channels = channels
         self.worker.level.connect(self.on_level)
         self.worker.detected.connect(self.on_detected)
@@ -598,7 +626,7 @@ class MainWindow(QMainWindow):
         self.session = None
         acc, per = holo.leave_one_out(X, y)
         model = holo.Model().fit(X, y)
-        holo.save_profile(model, 1, X, y)
+        holo.save_profile(model, 1, X, y, path=self.profile_file)
         self.model, self.profile_channels = model, 1
         self._reset_calibration_ui()
         self.set_status("Listening. Tap a zone.")
@@ -647,10 +675,36 @@ class MainWindow(QMainWindow):
         self.log(f"Ran the {core.zone_title(zone)} action.")
 
     # ---- settings -------------------------------------------------------------------
+    def _set_input_mode(self, label):
+        mode = core.INPUT_MODES.get(label)
+        if mode is None or mode == self.input_mode:
+            return
+        listening = self.worker is not None
+        if not self.stop_worker():
+            self.mode_box.blockSignals(True)
+            self.mode_box.setCurrentText(next(k for k, v in core.INPUT_MODES.items() if v == self.input_mode))
+            self.mode_box.blockSignals(False)
+            return
+        if self.session is not None:
+            self.cancel_calibration()
+        self.input_mode = mode
+        self.settings.set("input_mode", mode)
+        self.profile_file = core.profile_path(mode)
+        self.profile_label.setText(f"Profile: {self.profile_file}")
+        self.mode_hint.setVisible(mode == "headset")
+        self.sensitivity_box.blockSignals(True)
+        self.sensitivity_box.setCurrentText(core.sensitivity_name(self.settings, mode))
+        self.sensitivity_box.blockSignals(False)
+        self._accept_after = time.monotonic()
+        self.load_model()
+        self.populate_devices()
+        if listening:
+            self.start_worker(self.profile_channels)
+
     def _set_sensitivity(self, name):
         if name not in core.SENSITIVITIES:
             return
-        self.settings.set("sensitivity", name)
+        self.settings.set(core.setting_key(self.input_mode, "sensitivity"), name)
         if self.session is not None:
             self.cancel_calibration()
         if self.worker is not None:

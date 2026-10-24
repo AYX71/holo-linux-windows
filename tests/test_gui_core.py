@@ -99,6 +99,24 @@ class Devices(unittest.TestCase):
         self.assertTrue(0 < core.level_percent(0.01) < 100)
 
 
+class InputModes(unittest.TestCase):
+    def test_mode_profiles_are_separate_and_laptop_keeps_original_path(self):
+        self.assertEqual(core.profile_path('laptop'), holo.PROFILE)
+        self.assertNotEqual(core.profile_path('headset'), holo.PROFILE)
+        self.assertEqual(core.profile_path('headset').name, 'profile-headset.json')
+
+    def test_sensitivity_defaults_and_preferences_are_independent(self):
+        with tempfile.TemporaryDirectory() as d:
+            settings = core.Settings(pathlib.Path(d) / 'gui.json')
+            self.assertEqual(core.sensitivity_name(settings, 'laptop'), 'Balanced')
+            self.assertEqual(core.sensitivity_name(settings, 'headset'), 'Sensitive')
+            settings.set(core.setting_key('headset', 'sensitivity'), 'Very sensitive')
+            self.assertEqual(core.sensitivity_name(settings, 'headset'), 'Very sensitive')
+            self.assertEqual(core.sensitivity_name(settings, 'laptop'), 'Balanced')
+            self.assertNotEqual(core.setting_key('laptop', 'device_name'),
+                                core.setting_key('headset', 'device_name'))
+
+
 class Calibration(unittest.TestCase):
     def test_flow(self):
         s = core.CalibrationSession(["a", "b"], 3)

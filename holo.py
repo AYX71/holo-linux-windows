@@ -300,18 +300,22 @@ def leave_one_out(X, y):
 # --------------------------------------------------------------------------
 # Profile storage
 # --------------------------------------------------------------------------
-def save_profile(model, channels, X, y):
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+def save_profile(model, channels, X, y, path=None):
+    path = Path(path) if path is not None else PROFILE
+    path.parent.mkdir(parents=True, exist_ok=True)
     d = model.to_json()
     d["channels"] = channels
     d["data"] = {"X": [np.asarray(x).tolist() for x in X], "y": list(y)}
-    PROFILE.write_text(json.dumps(d))
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d))
+    tmp.replace(path)
 
 
-def load_profile():
-    if not PROFILE.exists():
+def load_profile(path=None):
+    path = Path(path) if path is not None else PROFILE
+    if not path.exists():
         sys.exit("No profile yet. Run: holo calibrate")
-    d = json.loads(PROFILE.read_text())
+    d = json.loads(path.read_text())
     return Model.from_json(d), int(d.get("channels", 1)), d
 
 
@@ -325,10 +329,47 @@ def cap_negatives(X, y):
 # --------------------------------------------------------------------------
 # Audio
 # --------------------------------------------------------------------------
+class NativeRateAdapter:
+    """Streaming linear upsampling to 48 kHz; emits complete detector blocks.
+
+    Used only when a headset cannot open at 48 kHz. Interpolation cannot
+    restore frequencies the microphone did not capture.
+    """
+
+    def __init__(self, sample_rate, channels=1):
+        if not 8000 <= sample_rate <= SR:
+            raise ValueError("Headset sample rate must be between 8000 and 48000 Hz")
+        self.step = float(sample_rate) / SR
+        self.channels = channels
+        self.source = np.empty((0, channels), dtype="float32")
+        self.pending = np.empty((0, channels), dtype="float32")
+        self.position = 0.0
+
+    def feed(self, block):
+        self.source = np.concatenate([self.source, np.asarray(block).reshape(-1, self.channels)])
+        count = max(0, int(np.floor((len(self.source) - 1 - self.position) / self.step)) + 1)
+        if not count:
+            return []
+        positions = self.position + np.arange(count) * self.step
+        samples = np.column_stack([np.interp(positions, np.arange(len(self.source)),
+                                            self.source[:, ch]) for ch in range(self.channels)])
+        self.position += count * self.step
+        consumed = min(int(self.position), len(self.source) - 1)
+        self.source = self.source[consumed:]
+        self.position -= consumed
+        self.pending = np.concatenate([self.pending, samples.astype("float32")])
+        blocks = []
+        while len(self.pending) >= BLOCK:
+            block = self.pending[:BLOCK].copy()
+            blocks.append(block[:, 0] if self.channels == 1 else block)
+            self.pending = self.pending[BLOCK:]
+        return blocks
+
+
 class Listener:
     """Owns the input stream; yields detected tap windows."""
 
-    def __init__(self, device=None, channels=1, sensitivity=1.0):
+    def __init__(self, device=None, channels=1, sensitivity=1.0, headset=False):
         import sounddevice as sd
         self.channels = channels
         self.q = queue.Queue(maxsize=50)  # at most half a second, never an endless backlog
@@ -336,9 +377,24 @@ class Listener:
         self.detector = Detector(sensitivity)
         self.dropped_blocks = 0
         self.input_overflows = 0
-        self.stream = sd.InputStream(
-            samplerate=SR, blocksize=BLOCK, channels=channels, dtype="float32",
-            device=device, callback=self._cb, latency="high")
+        self.sample_rate = SR
+        self.adapter = None
+        self.ready_blocks = deque()
+        try:
+            self.stream = sd.InputStream(
+                samplerate=SR, blocksize=BLOCK, channels=channels, dtype="float32",
+                device=device, callback=self._cb, latency="high")
+        except Exception:
+            if not headset:
+                raise
+            native = float(sd.query_devices(device, "input")["default_samplerate"])
+            if not 8000 <= native < SR:
+                raise
+            self.sample_rate = native
+            self.adapter = NativeRateAdapter(native, channels)
+            self.stream = sd.InputStream(
+                samplerate=native, blocksize=round(native * BLOCK / SR), channels=channels,
+                dtype="float32", device=device, callback=self._cb, latency="high")
 
     def _cb(self, indata, frames, t, status):
         block = indata[:, 0].copy() if self.channels == 1 else indata.copy()
@@ -357,14 +413,29 @@ class Listener:
         self.q.put_nowait((time.monotonic(), block, gap))
 
     def read_block(self, timeout=0.2):
-        t, block, gap = self.q.get(timeout=timeout)
-        if gap:
-            # Never join pieces of an interrupted recording into a fake tap.
-            self.detector = Detector(self.sensitivity)
-        if time.monotonic() - t > 0.5:
-            self.detector = Detector(self.sensitivity)
-            raise queue.Empty
-        return t, block
+        end = time.monotonic() + timeout
+        while True:
+            if self.ready_blocks:
+                t, block = self.ready_blocks.popleft()
+                if time.monotonic() - t <= 0.5:
+                    return t, block
+                self._reset_audio()
+                raise queue.Empty
+            t, block, gap = self.q.get(timeout=max(0, end - time.monotonic()))
+            if gap:
+                self._reset_audio()
+            if time.monotonic() - t > 0.5:
+                self._reset_audio()
+                raise queue.Empty
+            if self.adapter is None:
+                return t, block
+            self.ready_blocks.extend((t, b) for b in self.adapter.feed(block))
+
+    def _reset_audio(self):
+        self.detector = Detector(self.sensitivity)
+        self.ready_blocks.clear()
+        if self.adapter is not None:
+            self.adapter = NativeRateAdapter(self.sample_rate, self.channels)
 
     def __enter__(self):
         try:
@@ -383,7 +454,7 @@ class Listener:
     def drain(self):
         while not self.q.empty():
             self.q.get_nowait()
-        self.detector = Detector(self.sensitivity)
+        self._reset_audio()
         time.sleep(0.9)          # let the detector relearn the room
         while not self.q.empty():
             self.q.get_nowait()

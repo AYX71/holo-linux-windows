@@ -7,6 +7,7 @@ code (typos, wrong variable names, logic errors), NOT mistakes in how Qt is
 used or how the window looks. Only a real run can show those.
 """
 import os
+import json
 import pathlib
 import sys
 import tempfile
@@ -298,7 +299,7 @@ class GuiFlow(unittest.TestCase):
         session = core.CalibrationSession(holo.ZONES, 3)
         session.begin_zone()
         window = T.one_window(T.resonant_tap('left_rear'))
-        with patch.object(self.win, 'session', session), patch.object(self.gui.time, 'monotonic', return_value=10):
+        with patch.object(self.win, 'worker', _DummyWorker()), patch.object(self.win, 'session', session), patch.object(self.gui.time, 'monotonic', return_value=10):
             self.win.on_detected(window, captured_at=8)
         self.assertEqual(session.samples['left_rear'], [])
 
@@ -307,9 +308,42 @@ class GuiFlow(unittest.TestCase):
         old_worker = self.gui.AudioWorker(None, 1)
         old_worker.detected.connect(self.win.on_detected)
         window = T.one_window(T.resonant_tap('right_front'))
-        with patch.object(self.win.model, 'predict') as predict:
+        with patch.object(self.win, 'worker', _DummyWorker()), patch.object(self.win.model, 'predict') as predict:
             old_worker.detected.emit(window, self.gui.time.monotonic())
             predict.assert_not_called()
+
+    def test_headset_mode_preserves_laptop_profile_and_restores_it(self):
+        w = self.win
+        laptop_bytes = holo.PROFILE.read_bytes()
+        devices = types.SimpleNamespace(query_devices=lambda: [], query_hostapis=lambda: [])
+        with patch.dict(sys.modules, {'sounddevice': devices}), patch.object(w, 'start_worker') as start:
+            w._set_input_mode('Headset microphone (experimental)')
+            self.assertEqual(w.input_mode, 'headset')
+            self.assertIsNone(w.model)
+            self.assertEqual(w.profile_file.name, 'profile-headset.json')
+            self.assertEqual(core.sensitivity_name(w.settings, w.input_mode), 'Sensitive')
+            self.assertEqual(holo.PROFILE.read_bytes(), laptop_bytes)
+            original = json.loads(laptop_bytes)
+            w.session = types.SimpleNamespace(dataset=lambda: (original['data']['X'], original['data']['y']))
+            w._finish_calibration()
+            self.assertTrue(w.profile_file.is_file())
+            w.load_model()
+            self.assertIsNotNone(w.model)
+            self.assertEqual(holo.PROFILE.read_bytes(), laptop_bytes)
+            w._set_input_mode('Laptop microphone')
+            self.assertIsNotNone(w.model)
+            self.assertEqual(w.profile_file, holo.PROFILE)
+            self.assertEqual(holo.PROFILE.read_bytes(), laptop_bytes)
+
+    def test_worker_enables_native_rate_fallback_only_in_headset_mode(self):
+        listener = Mock()
+        listener.sample_rate = 16000
+        listener.read_block.side_effect = RuntimeError('test end')
+        worker = self.gui.AudioWorker(3, 1, 1.5, headset=True)
+        with patch.object(holo, 'Listener', return_value=listener) as create:
+            worker.run()
+        create.assert_called_once_with(3, 1, 1.5, headset=True)
+        listener.stream.close.assert_called_once()
 
 
 if __name__ == "__main__":
